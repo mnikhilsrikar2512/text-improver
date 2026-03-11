@@ -2,7 +2,7 @@ import os
 
 
 API_TITLE = "AI Text Improver API"
-API_VERSION = "3.1.0"
+API_VERSION = "3.2.0"
 CACHE_VERSION = os.getenv("CACHE_VERSION", "rewrite_v1")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
@@ -17,9 +17,10 @@ REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 REDIS_TIMEOUT = float(os.getenv("REDIS_TIMEOUT", "1.5"))
 
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))
-SUGGESTION_COUNT = int(os.getenv("SUGGESTION_COUNT", "5"))
-SUGGESTION_POOL_SIZE = int(os.getenv("SUGGESTION_POOL_SIZE", "10"))
+SUGGESTION_COUNT = int(os.getenv("SUGGESTION_COUNT", "3"))
+SUGGESTION_POOL_SIZE = int(os.getenv("SUGGESTION_POOL_SIZE", "12"))
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "10"))
+FEEDBACK_TTL = int(os.getenv("FEEDBACK_TTL", "2592000"))
 
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "30"))
 RATE_WINDOW = int(os.getenv("RATE_WINDOW", "60"))

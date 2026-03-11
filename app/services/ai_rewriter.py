@@ -12,24 +12,25 @@ from app.config import (
     SUGGESTION_COUNT,
     SUGGESTION_POOL_SIZE,
 )
+from app.services.feedback_service import build_preference_context
 from app.services.grammar_service import correct_grammar
 
 VARIATION_HINTS = [
-    "Keep the tone concise and professional.",
-    "Use a neutral HR-friendly tone.",
-    "Sound polite and formal without adding new facts.",
-    "Use a calm workplace communication style.",
-    "Make the phrasing empathetic but still professional.",
-    "Use an executive-ready workplace tone.",
-    "Keep the message direct and policy-safe.",
-    "Prefer wording suitable for HR documentation.",
+    "Keep the tone natural, clear, and professional.",
+    "Use a calm workplace tone that sounds human, not robotic.",
+    "Sound polite and polished without becoming overly formal.",
+    "Write it the way a thoughtful employee would naturally say it at work.",
+    "Make the phrasing warm and professional without adding new facts.",
+    "Keep it concise and natural for internal workplace communication.",
+    "Prefer plain, clear business English over stiff wording.",
+    "Keep the message HR-safe while sounding conversational and respectful.",
 ]
 
 PROMPT = """
 You are an HR communication assistant.
 
 Task:
-- Rewrite the full message in polished business English.
+- Rewrite the full message in natural, polished workplace English.
 - Preserve the exact meaning and intent.
 - Improve grammar, punctuation, and clarity.
 - Keep the output safe for workplace and HR communication.
@@ -37,10 +38,15 @@ Task:
 - Do not use abusive, insulting, sexual, or threatening language.
 - Return {suggestion_pool_size} distinct rewrite options.
 - Each option must be a complete rewrite of the whole message.
+- Avoid stiff phrases like "This is to inform you" unless they are genuinely natural.
+- Prefer wording that sounds human, direct, and respectful.
 - Output JSON only.
 
 Variation guidance:
 {variation_hint}
+
+Preference guidance:
+{preference_hint}
 
 JSON format:
 {{
@@ -269,12 +275,16 @@ def _extract_labeled_value(value):
     return value
 
 
-def generate_suggestions(text: str, attempt: int = 0) -> tuple[str, list[str]]:
+def generate_suggestions(text: str, attempt: int = 0, feedback_profile: dict | None = None) -> tuple[str, list[str]]:
     improved_input = correct_grammar(text)
     variation_hint = VARIATION_HINTS[attempt % len(VARIATION_HINTS)]
+    preference_hint = build_preference_context(feedback_profile or {})
+    if not preference_hint:
+        preference_hint = "No prior user feedback is available. Focus on natural workplace variation."
     prompt = PROMPT.format(
         text=improved_input,
         variation_hint=variation_hint,
+        preference_hint=preference_hint,
         suggestion_pool_size=SUGGESTION_POOL_SIZE,
     )
 

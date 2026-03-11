@@ -21,6 +21,23 @@ class AttemptMetadata(BaseModel):
     wrapped: bool
 
 
+class FeedbackRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Original text associated with the feedback")
+    accepted_suggestion: str | None = Field(
+        default=None,
+        description="Suggestion selected by the user, if any",
+    )
+    rejected_suggestions: list[str] = Field(
+        default_factory=list,
+        description="Suggestions explicitly rejected by the user",
+    )
+
+
+class FeedbackResponse(BaseModel):
+    status: str
+    learned_preferences: dict[str, int]
+
+
 class ImproveResponse(BaseModel):
     original: str
     improved_input: str

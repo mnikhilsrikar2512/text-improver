@@ -2,10 +2,23 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.models.request_models import HealthResponse, ImproveRequest, ImproveResponse, ReadinessResponse
+from app.models.request_models import (
+    FeedbackRequest,
+    FeedbackResponse,
+    HealthResponse,
+    ImproveRequest,
+    ImproveResponse,
+    ReadinessResponse,
+)
 from app.config import CACHE_VERSION, MODEL_NAME, PROMPT_VERSION, SUGGESTION_COUNT, SUGGESTION_POOL_SIZE
 from app.services.ai_rewriter import generate_suggestions
 from app.services.cache_service import cache_suggestions, get_cached, is_cache_payload_compatible
+from app.services.feedback_service import (
+    apply_feedback_learning,
+    feedback_signature,
+    get_feedback_profile,
+    record_feedback,
+)
 from app.services.fallback_rewriter import fallback_rewrite
 from app.services.guardrails import enforce_guardrails, validate_input
 from app.services.rate_limiter import check_rate_limit
@@ -34,6 +47,11 @@ def normalize_suggestions(items):
                     normalized.append(cleaned)
 
     return normalized
+
+
+def cache_matches_feedback(cached_payload, feedback_profile):
+    metadata = cached_payload.get("cache_metadata", {})
+    return metadata.get("feedback_version", 0) == feedback_signature(feedback_profile)
 
 
 def select_attempt_batch(pool, attempt):
@@ -79,6 +97,23 @@ def ready():
     }
 
 
+@router.post("/feedback", response_model=FeedbackResponse)
+def submit_feedback(req: FeedbackRequest):
+    original_text = validate_input(req.text)
+    guarded_text = enforce_guardrails(original_text)
+
+    learned_preferences = record_feedback(
+        guarded_text,
+        accepted_suggestion=req.accepted_suggestion,
+        rejected_suggestions=req.rejected_suggestions,
+    )
+
+    return {
+        "status": "recorded",
+        "learned_preferences": learned_preferences,
+    }
+
+
 @router.post("/improve-text", response_model=ImproveResponse)
 def improve_text(req: ImproveRequest, request: Request):
     start = time.time()
@@ -90,6 +125,7 @@ def improve_text(req: ImproveRequest, request: Request):
     original_text = validate_input(req.text)
     guarded_text = enforce_guardrails(original_text)
     key = build_cache_key(guarded_text)
+    feedback_profile = get_feedback_profile(guarded_text)
 
     cached_payload = get_cached(key)
     cache_hit = bool(cached_payload)
@@ -97,11 +133,19 @@ def improve_text(req: ImproveRequest, request: Request):
     should_generate = not cached_payload
 
     if cached_payload:
-        if is_cache_payload_compatible(cached_payload):
+        if is_cache_payload_compatible(cached_payload) and cache_matches_feedback(cached_payload, feedback_profile):
             improved_input = cached_payload.get("improved_input", guarded_text)
-            suggestions = normalize_suggestions(
-                cached_payload.get("suggestion_pool", cached_payload.get("suggestions", []))
+            suggestions = apply_feedback_learning(
+                normalize_suggestions(
+                    cached_payload.get("suggestion_pool", cached_payload.get("suggestions", []))
+                    if isinstance(cached_payload, dict)
+                    else []
+                ),
+                feedback_profile,
             )
+            if feedback_signature(feedback_profile) > 0 and len(suggestions) < SUGGESTION_COUNT:
+                cache_hit = False
+                should_generate = True
         else:
             cache_hit = False
             improved_input = guarded_text
@@ -109,12 +153,12 @@ def improve_text(req: ImproveRequest, request: Request):
             should_generate = True
 
     if should_generate:
-        improved_input, suggestions = generate_suggestions(guarded_text, req.attempt)
+        improved_input, suggestions = generate_suggestions(guarded_text, req.attempt, feedback_profile=feedback_profile)
 
         if not suggestions:
             suggestions = fallback_rewrite(improved_input, req.attempt)
 
-        suggestions = normalize_suggestions(suggestions)
+        suggestions = apply_feedback_learning(normalize_suggestions(suggestions), feedback_profile)
         cache_suggestions(
             key,
             {
@@ -125,13 +169,17 @@ def improve_text(req: ImproveRequest, request: Request):
                     "model_name": MODEL_NAME,
                     "prompt_version": PROMPT_VERSION,
                     "pool_size": SUGGESTION_POOL_SIZE,
+                    "feedback_version": feedback_signature(feedback_profile),
                 },
             },
         )
 
     if not suggestions:
         suggestions = fallback_rewrite(improved_input if cache_hit else guarded_text, req.attempt)
-        suggestions = normalize_suggestions(suggestions)
+        suggestions = apply_feedback_learning(normalize_suggestions(suggestions), feedback_profile)
+
+    if not suggestions:
+        raise HTTPException(status_code=503, detail="No suggestions available at the moment")
 
     suggestions, selected_index, attempt_metadata = select_attempt_batch(suggestions, req.attempt)
     latency = int((time.time() - start) * 1000)

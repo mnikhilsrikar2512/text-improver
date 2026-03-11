@@ -1,6 +1,6 @@
 # AI Text Improver API
 
-FastAPI service for HR-safe text rewriting using a local Ollama model, Redis-backed caching and rate limiting, grammar correction, audit logging, and attempt-based suggestion pools.
+FastAPI service for HR-safe text rewriting using a local Ollama model, Redis-backed caching and rate limiting, grammar correction, audit logging, attempt-based suggestion pools, and feedback-driven learning from accepted and rejected suggestions.
 
 ## Overview
 
@@ -10,6 +10,8 @@ This API is designed for integration into internal HR and workflow systems where
 - rewrites must stay on local infrastructure
 - repeated requests should be cached
 - retry attempts should return a fresh batch of suggestions
+- accepted suggestions should influence future phrasing for the same input
+- rejected suggestions should be filtered or demoted on later attempts
 - unsafe or abusive input should be blocked
 - requests should be traceable in logs
 
@@ -30,6 +32,7 @@ Main components:
 - `app/services/grammar_service.py`: grammar correction and warmup
 - `app/services/guardrails.py`: validation and HR language guardrails
 - `app/services/cache_service.py`: Redis cache read/write and compatibility checks
+- `app/services/feedback_service.py`: accepted/rejected suggestion memory and reranking
 - `app/services/rate_limiter.py`: Redis-backed per-IP rate limiting
 - `app/services/fallback_rewriter.py`: deterministic fallback rewrites
 - `app/services/system_health.py`: readiness status for dependencies
@@ -45,11 +48,13 @@ Request flow:
 3. Rate-limit by client IP.
 4. Build a versioned cache key from normalized input + model/prompt settings.
 5. Load a cached suggestion pool from Redis if available.
-6. If cache miss, grammar-correct input and generate a suggestion pool through Ollama.
-7. Reject malformed or low-quality model output and retry automatically.
-8. Fall back to deterministic local rewrites if the model still fails.
-9. Return a non-overlapping batch of suggestions for the current `attempt`.
-10. Log a structured audit event with request tracing metadata.
+6. Load the feedback profile for the same normalized input.
+7. If cache miss or stale feedback version, grammar-correct input and generate a suggestion pool through Ollama.
+8. Reject malformed or low-quality model output and retry automatically.
+9. Fall back to deterministic local rewrites if the model still fails.
+10. Rerank suggestions using accepted and rejected user feedback.
+11. Return a non-overlapping batch of suggestions for the current `attempt`.
+12. Log a structured audit event with request tracing metadata.
 
 ## Folder Structure
 
@@ -65,6 +70,7 @@ text-improver-api/
 │   ├── services/
 │   │   ├── ai_rewriter.py
 │   │   ├── cache_service.py
+│   │   ├── feedback_service.py
 │   │   ├── fallback_rewriter.py
 │   │   ├── grammar_service.py
 │   │   ├── guardrails.py
@@ -163,6 +169,8 @@ python -m unittest discover -s tests -v
   - returns `503` when required dependencies are unavailable
 - `POST /improve-text`
   - main rewrite endpoint
+- `POST /feedback`
+  - records accepted and rejected suggestions for the same input
 
 Swagger UI:
 
@@ -187,17 +195,15 @@ Swagger UI:
   "improved_input": "I am writing to request leave for Monday and Tuesday.",
   "attempt": 0,
   "selected_index": 0,
-  "selected_suggestion": "I would like to formally communicate that I am writing to request leave for Monday and Tuesday.",
+  "selected_suggestion": "I would like to request leave for Monday and Tuesday.",
   "suggestions": [
-    "I would like to formally communicate that I am writing to request leave for Monday and Tuesday.",
-    "Please note that I am writing to request leave for Monday and Tuesday.",
-    "I am writing to inform you that I am writing to request leave for Monday and Tuesday.",
-    "This message is to respectfully state that I am writing to request leave for Monday and Tuesday.",
-    "I would like to share that I am writing to request leave for Monday and Tuesday."
+    "I would like to request leave for Monday and Tuesday.",
+    "Please consider this my leave request for Monday and Tuesday.",
+    "I am requesting leave for Monday and Tuesday."
   ],
   "attempt_metadata": {
-    "batch_size": 5,
-    "pool_size": 10,
+    "batch_size": 3,
+    "pool_size": 12,
     "batch_start": 0,
     "next_attempt": 1,
     "wrapped": false
@@ -207,17 +213,45 @@ Swagger UI:
 }
 ```
 
+### Feedback Request
+
+```json
+{
+  "text": "I am writing to request leave for Monday and Tuesday.",
+  "accepted_suggestion": "I would like to request leave for Monday and Tuesday.",
+  "rejected_suggestions": [
+    "Please consider this my leave request for Monday and Tuesday.",
+    "I am requesting leave for Monday and Tuesday."
+  ]
+}
+```
+
+### Feedback Response
+
+```json
+{
+  "status": "recorded",
+  "learned_preferences": {
+    "accepted": 1,
+    "rejected": 2,
+    "version": 1
+  }
+}
+```
+
 ## Suggestions and Attempts
 
 The API uses two levels of suggestion storage:
 
-- visible batch size: `5`
-- cached suggestion pool size: `10`
+- visible batch size: `3`
+- cached suggestion pool size: `12`
 
 Behavior:
 
-- `attempt = 0` returns pool items `1-5`
-- `attempt = 1` returns pool items `6-10`
+- `attempt = 0` returns pool items `1-3`
+- `attempt = 1` returns pool items `4-6`
+- `attempt = 2` returns pool items `7-9`
+- `attempt = 3` returns pool items `10-12`
 - next attempts wrap after all batches are exhausted
 
 This is exposed in `attempt_metadata`:
@@ -228,9 +262,24 @@ This is exposed in `attempt_metadata`:
 - `next_attempt`: next attempt value to request
 - `wrapped`: whether the attempt cycle has wrapped to an earlier batch
 
+## Feedback Learning
+
+The API now learns per normalized input.
+
+Behavior:
+
+- the UI or client sends accepted and rejected suggestions to `POST /feedback`
+- accepted suggestions are stored as preferred examples
+- rejected suggestions are stored as phrases to avoid
+- the feedback profile is passed into Ollama prompt generation
+- cached suggestion pools are invalidated when the feedback profile changes
+- future responses are reranked so accepted-style phrasing rises and rejected-style phrasing is filtered or demoted
+
+This keeps the system from returning the same cached pool unchanged after the user has already shown a preference.
+
 ## Caching
 
-Redis caching is implemented for rewrite pools.
+Redis caching is implemented for rewrite pools, and feedback is stored separately.
 
 Current cache strategy:
 
@@ -246,7 +295,7 @@ Current cache strategy:
 Example key shape:
 
 ```text
-rewrite:rewrite_v1:llama3:hr_prompt_v1:batch5:pool10:<sha256>
+rewrite:rewrite_v1:llama3:hr_prompt_v1:batch3:pool12:<sha256>
 ```
 
 Cached payload includes:
@@ -254,6 +303,16 @@ Cached payload includes:
 - `improved_input`
 - `suggestion_pool`
 - `cache_metadata`
+
+`cache_metadata` also includes a `feedback_version`. If the feedback profile changes because the user accepted or rejected suggestions, the old cached pool is treated as stale and the API regenerates a new pool.
+
+Feedback storage uses a separate Redis key based on the normalized input hash and stores:
+
+- accepted examples
+- rejected examples
+- accepted token counts
+- rejected token counts
+- feedback version
 
 Legacy cache payloads without metadata are treated as incompatible and regenerated.
 
@@ -311,6 +370,7 @@ export REDIS_HOST=localhost
 export REDIS_PORT=6379
 export REDIS_DB=0
 export CACHE_TTL=3600
+export FEEDBACK_TTL=2592000
 export RATE_LIMIT=30
 export RATE_WINDOW=60
 export CACHE_VERSION=rewrite_v1
@@ -318,6 +378,8 @@ export PROMPT_VERSION=hr_prompt_v1
 export ENVIRONMENT=production
 export REQUIRE_REDIS=true
 export WARM_DEPENDENCIES_ON_STARTUP=true
+export SUGGESTION_COUNT=3
+export SUGGESTION_POOL_SIZE=12
 ```
 
 ## Audit Logging

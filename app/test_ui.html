@@ -160,6 +160,8 @@ let suggestions=[]
 let currentIndex=0
 let currentAttempt=0
 let currentAttemptMeta=null
+let rejectedSuggestions=[]
+const API_BASE="http://127.0.0.1:8000"
 
 const input=document.getElementById("reasonInput")
 const loading=document.getElementById("loading")
@@ -206,6 +208,7 @@ return
 
 if(resetAttempt){
 currentAttempt=0
+rejectedSuggestions=[]
 }
 
 loading.style.display="block"
@@ -213,7 +216,7 @@ improveBtn.disabled=true
 
 try{
 
-const response=await fetch("http://127.0.0.1:8000/improve-text",{
+const response=await fetch(API_BASE+"/improve-text",{
 method:"POST",
 headers:{
 "Content-Type":"application/json"
@@ -236,6 +239,9 @@ suggestions=(data.suggestions || [])
 
 currentIndex=Number.isInteger(data.selected_index)?data.selected_index:0
 currentAttemptMeta=data.attempt_metadata || null
+if(resetAttempt){
+rejectedSuggestions=[]
+}
 
 showSuggestion()
 
@@ -279,11 +285,46 @@ document.getElementById("suggestionStatus").innerText=
 }
 
 
+async function submitFeedback(acceptedSuggestion,rejectedItems){
+
+const payload={
+text:input.value.trim(),
+accepted_suggestion:acceptedSuggestion || null,
+rejected_suggestions:rejectedItems || []
+}
+
+if(!payload.text || (!payload.accepted_suggestion && payload.rejected_suggestions.length===0)){
+return
+}
+
+try{
+await fetch(API_BASE+"/feedback",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify(payload)
+})
+}catch(err){
+console.error("Feedback submission failed",err)
+}
+
+}
+
+
 async function rejectSuggestion(){
+
+const rejected=suggestions[currentIndex]
+if(rejected){
+rejectedSuggestions.push(rejected)
+}
 
 currentIndex++
 
 if(currentIndex>=suggestions.length){
+
+await submitFeedback(null,rejectedSuggestions)
+rejectedSuggestions=[]
 
 currentAttempt++
 
@@ -297,14 +338,18 @@ showSuggestion()
 }
 
 
-function acceptSuggestion(){
+async function acceptSuggestion(){
 
-input.value=suggestions[currentIndex]
+const accepted=suggestions[currentIndex]
+await submitFeedback(accepted,rejectedSuggestions)
+
+input.value=accepted
 
 document.getElementById("outputBox").style.display="none"
 
 currentAttempt=0
 currentAttemptMeta=null
+rejectedSuggestions=[]
 
 }
 
