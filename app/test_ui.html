@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="UTF-8">
+<title>AI Text Improver</title>
+
+<style>
+
+*{
+    box-sizing:border-box;
+}
+
+body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto;
+    background:#f3f4f6;
+    margin:0;
+    padding:40px;
+}
+
+.container{
+    max-width:700px;
+    margin:auto;
+    background:white;
+    padding:30px;
+    border-radius:12px;
+    box-shadow:0 10px 30px rgba(0,0,0,0.08);
+}
+
+h2{
+    margin-top:0;
+    margin-bottom:20px;
+}
+
+textarea{
+    width:100%;
+    height:140px;
+    padding:14px;
+    font-size:15px;
+    border-radius:8px;
+    border:1px solid #d1d5db;
+    resize:none;
+    outline:none;
+}
+
+textarea:focus{
+    border-color:#2563eb;
+}
+
+.controls{
+    margin-top:15px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+}
+
+button{
+    border:none;
+    border-radius:8px;
+    padding:10px 20px;
+    font-size:14px;
+    cursor:pointer;
+}
+
+button:disabled{
+    opacity:0.6;
+    cursor:not-allowed;
+}
+
+#improveBtn{
+    background:#2563eb;
+    color:white;
+}
+
+.accept{
+    background:#16a34a;
+    color:white;
+}
+
+.reject{
+    background:#dc2626;
+    color:white;
+}
+
+.output{
+    margin-top:25px;
+    padding:18px;
+    border-radius:8px;
+    background:#f9fafb;
+    border:1px solid #e5e7eb;
+}
+
+.actions{
+    margin-top:15px;
+    display:flex;
+    gap:10px;
+}
+
+.status{
+    font-size:13px;
+    color:#6b7280;
+}
+
+.loading{
+    font-size:14px;
+    color:#2563eb;
+}
+
+.counter{
+    font-size:12px;
+    color:#6b7280;
+}
+
+</style>
+</head>
+
+
+<body>
+
+<div class="container">
+
+<h2>AI Text Improver</h2>
+
+<textarea id="reasonInput" placeholder="Enter text to improve..."></textarea>
+
+<div class="controls">
+
+<div class="counter" id="charCount">0 characters</div>
+
+<button id="improveBtn" onclick="improveText()">Improve</button>
+
+</div>
+
+<div id="loading" class="loading" style="display:none">
+Improving text...
+</div>
+
+<div class="output" id="outputBox" style="display:none">
+
+<div id="suggestionText"></div>
+
+<div class="status" id="suggestionStatus"></div>
+
+<div class="actions">
+
+<button class="accept" onclick="acceptSuggestion()">Accept</button>
+
+<button class="reject" onclick="rejectSuggestion()">Reject</button>
+
+</div>
+
+</div>
+
+</div>
+
+
+<script>
+
+let suggestions=[]
+let currentIndex=0
+let currentAttempt=0
+let currentAttemptMeta=null
+
+const input=document.getElementById("reasonInput")
+const loading=document.getElementById("loading")
+const improveBtn=document.getElementById("improveBtn")
+
+input.addEventListener("input",()=>{
+document.getElementById("charCount").innerText=input.value.length+" characters"
+})
+
+function normalizeSuggestion(item){
+
+if(typeof item==="string"){
+return item
+.replace(/```[a-zA-Z]*\n?/g,"")
+.replace(/^"?((Rewrite|Suggestion)\s*\d+)"?\s*:\s*/i,"")
+.replace(/^["'{\[,]*/,"")
+.replace(/[,"'}\]]*$/,"")
+.trim()
+}
+
+if(item && typeof item==="object"){
+if(typeof item.rewritten==="string"){
+    return item.rewritten
+    .replace(/```[a-zA-Z]*\n?/g,"")
+    .replace(/^"?((Rewrite|Suggestion)\s*\d+)"?\s*:\s*/i,"")
+    .replace(/^["'{\[,]*/,"")
+    .replace(/[,"'}\]]*$/,"")
+    .trim()
+}
+}
+
+return ""
+}
+
+
+async function improveText(resetAttempt=true){
+
+const text=input.value.trim()
+
+if(!text){
+alert("Please enter text first")
+return
+}
+
+if(resetAttempt){
+currentAttempt=0
+}
+
+loading.style.display="block"
+improveBtn.disabled=true
+
+try{
+
+const response=await fetch("http://127.0.0.1:8000/improve-text",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+text:text,
+attempt:currentAttempt
+})
+})
+
+const data=await response.json()
+
+if(!response.ok){
+throw new Error(data.detail || "API error")
+}
+
+suggestions=(data.suggestions || [])
+.map(normalizeSuggestion)
+.filter(Boolean)
+
+currentIndex=Number.isInteger(data.selected_index)?data.selected_index:0
+currentAttemptMeta=data.attempt_metadata || null
+
+showSuggestion()
+
+}catch(err){
+
+alert("Error: "+err.message)
+
+}finally{
+
+loading.style.display="none"
+improveBtn.disabled=false
+
+}
+
+}
+
+
+function showSuggestion(){
+
+if(suggestions.length===0){
+alert("No suggestions available")
+return
+}
+
+document.getElementById("outputBox").style.display="block"
+
+document.getElementById("suggestionText").innerText=suggestions[currentIndex]
+
+if(currentAttemptMeta){
+document.getElementById("suggestionStatus").innerText=
+"Suggestion "+(currentIndex+1)+" of "+suggestions.length+
+" | Attempt "+currentAttempt+
+" | Pool "+currentAttemptMeta.pool_size+
+" total options"+
+" | Next reject loads attempt "+currentAttemptMeta.next_attempt
+}else{
+document.getElementById("suggestionStatus").innerText=
+"Suggestion "+(currentIndex+1)+" of "+suggestions.length
+}
+
+}
+
+
+async function rejectSuggestion(){
+
+currentIndex++
+
+if(currentIndex>=suggestions.length){
+
+currentAttempt++
+
+await improveText(false)
+
+return
+}
+
+showSuggestion()
+
+}
+
+
+function acceptSuggestion(){
+
+input.value=suggestions[currentIndex]
+
+document.getElementById("outputBox").style.display="none"
+
+currentAttempt=0
+currentAttemptMeta=null
+
+}
+
+</script>
+
+</body>
+</html>
